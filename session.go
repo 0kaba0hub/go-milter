@@ -205,6 +205,19 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 				return nil, err
 			}
 		}
+		// append requested symlist
+		if m.server.Actions&OptSetSymList != 0 {
+			for stage, macros := range m.server.SymList {
+				binary.Write(&buffer, binary.BigEndian, stage)
+				for i, macro := range macros {
+					if i != 0 {
+						buffer.WriteByte(' ')
+					}
+					buffer.WriteString(macro)
+				}
+				buffer.WriteByte(0)
+			}
+		}
 		// build and send packet
 		return NewResponse('O', buffer.Bytes()), nil
 
