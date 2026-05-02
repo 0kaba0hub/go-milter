@@ -6,12 +6,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
 )
+
+// writerPool reuses bufio.Writer instances across WritePacket calls to reduce
+// per-packet allocations.
+var writerPool = sync.Pool{
+	New: func() any { return bufio.NewWriter(nil) },
+}
 
 var errCloseSession = errors.New("Stop current milter processing")
 
@@ -69,30 +76,24 @@ func writePacket(conn net.Conn, msg *Message, timeout time.Duration) error {
 		defer conn.SetWriteDeadline(time.Time{})
 	}
 
-	buffer := bufio.NewWriter(conn)
+	buffer := writerPool.Get().(*bufio.Writer)
+	buffer.Reset(conn)
+	defer writerPool.Put(buffer)
 
-	// calculate and write response length
 	length := uint32(len(msg.Data) + 1)
 	if err := binary.Write(buffer, binary.BigEndian, length); err != nil {
 		return err
 	}
 
-	// write response code
 	if err := buffer.WriteByte(msg.Code); err != nil {
 		return err
 	}
 
-	// write response data
 	if _, err := buffer.Write(msg.Data); err != nil {
 		return err
 	}
 
-	// flush data to network socket stream
-	if err := buffer.Flush(); err != nil {
-		return err
-	}
-
-	return nil
+	return buffer.Flush()
 }
 
 // Process processes incoming milter commands
@@ -234,8 +235,7 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 		// data, ignore
 
 	default:
-		// print error and close session
-		log.Printf("Unrecognized command code: %c", msg.Code)
+		slog.Error("unrecognized milter command", "code", string(rune(msg.Code)))
 		return nil, errCloseSession
 	}
 
@@ -251,7 +251,7 @@ func (m *milterSession) HandleMilterCommands() {
 		msg, err := m.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("Error reading milter command: %v", err)
+				slog.Error("error reading milter command", "err", err)
 			}
 			return
 		}
@@ -259,8 +259,7 @@ func (m *milterSession) HandleMilterCommands() {
 		resp, err := m.Process(msg)
 		if err != nil {
 			if err != errCloseSession {
-				// log error condition
-				log.Printf("Error performing milter command: %v", err)
+				slog.Error("error performing milter command", "err", err)
 			}
 			return
 		}
@@ -269,7 +268,7 @@ func (m *milterSession) HandleMilterCommands() {
 		if resp != nil {
 			// send back response message
 			if err = m.WritePacket(resp.Response()); err != nil {
-				log.Printf("Error writing packet: %v", err)
+				slog.Error("error writing packet", "err", err)
 				return
 			}
 
