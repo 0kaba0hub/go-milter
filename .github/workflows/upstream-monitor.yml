@@ -1,0 +1,61 @@
+name: Check upstream go-milter
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'   # every Monday 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Check for new upstream release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK_BASE: v0.4.1
+        run: |
+          LATEST=$(gh release list --repo emersion/go-milter --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+
+          if [ -z "$LATEST" ]; then
+            echo "No releases found upstream, skipping."
+            exit 0
+          fi
+
+          echo "Upstream latest: $LATEST  Fork base: $FORK_BASE"
+
+          if [ "$LATEST" = "$FORK_BASE" ]; then
+            echo "Fork is up to date."
+            exit 0
+          fi
+
+          # Avoid duplicate issues
+          OPEN=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --search "upstream go-milter $LATEST in:title" \
+            --json number \
+            --jq 'length')
+
+          if [ "$OPEN" -gt 0 ]; then
+            echo "Issue for $LATEST already exists."
+            exit 0
+          fi
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "upstream go-milter $LATEST available (fork base: $FORK_BASE)" \
+            --body "## Upstream release detected
+
+          [emersion/go-milter](https://github.com/emersion/go-milter) published **$LATEST** (our fork base: \`$FORK_BASE\`).
+
+          ### Steps to update the fork
+          1. Review [release notes](https://github.com/emersion/go-milter/releases/tag/$LATEST) and [session.go diff](https://github.com/emersion/go-milter/compare/$FORK_BASE...$LATEST)
+          2. Merge upstream into fork: \`git fetch upstream && git merge upstream/master\`
+          3. Re-apply patches if session.go changed (slog, sync.Pool)
+          4. Update \`go.mod\` go version if needed
+          5. Run \`go test ./...\`
+          6. Bump tag: \`git tag $LATEST && git push origin $LATEST\`
+          7. Update \`go.mod\` replace directive in dependent repos
+          8. Update \`FORK_BASE\` in this workflow to \`$LATEST\`"
