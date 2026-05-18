@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/emersion/go-message/textproto"
+	"github.com/0kaba0hub/go-message/textproto"
 )
 
 type MockMilter struct {
