@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/emersion/go-message/textproto"
+	"github.com/0kaba0hub/go-message/textproto"
 )
 
 var ErrUnsupportedMilterVersion = fmt.Errorf("milter: negotiate: unsupported milter version")
