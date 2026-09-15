@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      actions: write
     steps:
       - name: Check for new upstream release
         env:
@@ -59,3 +60,11 @@ jobs:
           6. Bump tag: \`git tag $LATEST && git push origin $LATEST\`
           7. Update \`go.mod\` replace directive in dependent repos
           8. Update \`FORK_BASE\` in this workflow to \`$LATEST\`"
+
+      # GitHub disables a scheduled workflow after 60 days without repository
+      # activity; this workflow never pushes, so it re-enables itself each run.
+      - name: Keep the schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/upstream-monitor.yml/enable"
