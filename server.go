@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"net/textproto"
+	"sync"
+	"time"
 )
 
 // Milter protocol version implemented by the server.
@@ -108,6 +110,14 @@ type Server struct {
 	// [Server.Actions] must have the flag [OptSetSymList] set.
 	SymList map[Stage][]string
 
+	// ReadTimeout and WriteTimeout bound each packet a session reads and
+	// writes; 0 means no deadline. An MTA idle between commands of one
+	// session (a slow client) needs a ReadTimeout above its own milter
+	// timeouts.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+
+	mu        sync.Mutex
 	listeners []net.Listener
 	closed    bool
 }
@@ -116,12 +126,21 @@ type Server struct {
 func (s *Server) Serve(ln net.Listener) error {
 	defer ln.Close()
 
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrServerClosed
+	}
 	s.listeners = append(s.listeners, ln)
+	s.mu.Unlock()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if s.closed {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
 				return ErrServerClosed
 			}
 			return err
@@ -139,6 +158,8 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.closed = true
 	for _, ln := range s.listeners {
 		if err := ln.Close(); err != nil {

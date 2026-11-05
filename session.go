@@ -22,6 +22,17 @@ var writerPool = sync.Pool{
 
 var errCloseSession = errors.New("Stop current milter processing")
 
+// MaxPacketSize caps one milter packet. The MTA sends body chunks of at most
+// 64 KiB; a length beyond this is refused before anything is allocated.
+const MaxPacketSize = 1 << 20
+
+var (
+	errEmptyPacket   = errors.New("milter: packet of length 0")
+	errPacketTooBig  = errors.New("milter: packet longer than MaxPacketSize")
+	errMalformedConn = errors.New("milter: malformed CONNECT")
+	errEmptyMacro    = errors.New("milter: MACRO without a stage")
+)
+
 // milterSession keeps session state during MTA communication
 type milterSession struct {
 	server   *Server
@@ -33,9 +44,9 @@ type milterSession struct {
 	backend  Milter
 }
 
-// ReadPacket reads incoming milter packet
+// ReadPacket reads incoming milter packet, within the server's ReadTimeout.
 func (c *milterSession) ReadPacket() (*Message, error) {
-	return readPacket(c.conn, 0)
+	return readPacket(c.conn, c.server.ReadTimeout)
 }
 
 func readPacket(conn net.Conn, timeout time.Duration) (*Message, error) {
@@ -48,6 +59,13 @@ func readPacket(conn net.Conn, timeout time.Duration) (*Message, error) {
 	var length uint32
 	if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
 		return nil, err
+	}
+
+	if length == 0 {
+		return nil, errEmptyPacket
+	}
+	if length > MaxPacketSize {
+		return nil, errPacketTooBig
 	}
 
 	// read packet data
@@ -65,9 +83,9 @@ func readPacket(conn net.Conn, timeout time.Duration) (*Message, error) {
 	return &message, nil
 }
 
-// WritePacket sends a milter response packet to socket stream
+// WritePacket sends a milter response packet, within the server's WriteTimeout.
 func (m *milterSession) WritePacket(msg *Message) error {
-	return writePacket(m.conn, msg, 0)
+	return writePacket(m.conn, msg, m.server.WriteTimeout)
 }
 
 func writePacket(conn net.Conn, msg *Message, timeout time.Duration) error {
@@ -113,8 +131,12 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 
 	case CodeConn:
 		// new connection, get hostname
-		hostname := readCString(msg.Data)
-		msg.Data = msg.Data[len(hostname)+1:]
+		nul := bytes.IndexByte(msg.Data, 0)
+		if nul < 0 || nul+1 >= len(msg.Data) {
+			return nil, errMalformedConn
+		}
+		hostname := string(msg.Data[:nul])
+		msg.Data = msg.Data[nul+1:]
 		// get protocol family
 		protocolFamily := msg.Data[0]
 		msg.Data = msg.Data[1:]
@@ -145,6 +167,9 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 			newModifier(m))
 
 	case CodeMacro:
+		if len(msg.Data) == 0 {
+			return nil, errEmptyMacro
+		}
 		// define macros
 		m.macros = make(map[string]string)
 		// convert data to Go strings
@@ -163,7 +188,12 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 		return nil, nil
 
 	case CodeEOB:
-		// call and return milter handler
+		// the message ends: its headers and macros go, as on Abort, so a
+		// long-lived MTA connection does not keep growing them
+		defer func() {
+			m.headers = nil
+			m.macros = nil
+		}()
 		return m.backend.Body(newModifier(m))
 
 	case CodeHelo:
@@ -246,6 +276,13 @@ func (m *milterSession) Process(msg *Message) (Response, error) {
 // HandleMilterComands processes all milter commands in the same connection
 func (m *milterSession) HandleMilterCommands() {
 	defer m.conn.Close()
+	// A panic, in the backend or on a packet nobody foresaw, ends this
+	// session only, not the server.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("milter session panicked, closing it", "panic", r)
+		}
+	}()
 
 	for {
 		msg, err := m.ReadPacket()
